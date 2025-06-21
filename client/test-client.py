@@ -35,12 +35,13 @@ class MCPClient:
         self.function_declarations = convert_mcp_tools_to_gemini(tools)
 
     async def process_query(self, query: str) -> str:
+        guide = "Use available tools to answer the query. If a tool is needed, call it with the required parameters.\n\n"
         user_prompt_content = types.Content(
             role='user',
-            parts=[types.Part.from_text(text=query)]
+            parts=[types.Part.from_text(text=guide + query)]
         )
         response = self.genai_client.models.generate_content(
-            model='gemini-2.0-flash-001',
+            model='gemini-2.5-flash',
             contents=[user_prompt_content],
             config=types.GenerateContentConfig(
                 tools=self.function_declarations,
