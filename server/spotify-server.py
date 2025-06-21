@@ -1,6 +1,9 @@
 import os
+import sys
 import shutil
 import subprocess
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
@@ -8,40 +11,28 @@ load_dotenv()
 
 mcp = FastMCP("spotify")
 
-# Commented out Spotipy-based implementation
-# import spotipy
-# from spotipy.oauth2 import SpotifyOAuth
-# sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-#     client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-#     client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
-#     redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
-#     scope="user-read-playback-state user-modify-playback-state",
-#     cache_path=".spotify_token_cache"
-# ))
-#
-# @mcp.tool()
-# async def play_song(song_name: str, artist: str) -> str:
-#     query = f"{song_name} {artist}"
-#     results = sp.search(q=query, type='track', limit=1)
-#     if results['tracks']['items']:
-#         uri = results['tracks']['items'][0]['uri']
-#         sp.start_playback(uris=[uri])
-#         return f"Playing '{song_name}' by {artist} on Spotify."
-#     else:
-#         return f"Could not find '{song_name}' by {artist} on Spotify."
-
 @mcp.tool()
 async def play_song(song_name: str, artist: str) -> str:
+    # query song name and artist to get track id
+    sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+        client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+        client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+    ))
+    results = sp.search(q=f"track:{song_name} artist:{artist}", type="track")
+    if results["tracks"]["items"]:
+        track_id = results["tracks"]["items"][0]["id"]
+    else:
+        return f"Could not find track '{song_name}' by artist '{artist}'."
+
+    print(f'osascript command: tell application "Spotify" to play track "spotify:track:{track_id}"', file=sys.stderr)
+    # run subprocess to open Spotify and play using track id
     subprocess.run(['open', '-a', 'Spotify'])
 
-    safe_query = f"{song_name} {artist}".replace('"', '\\"')
 
     try:
         subprocess.run([
             'osascript',
-            '-e', 'tell application "Spotify"',
-            '-e', f'play track (first track of (search "{safe_query}"))',
-            '-e', 'end tell'
+            '-e', f'tell application "Spotify" to play track "spotify:track:{track_id}"'
         ], check=True)
 
         if not shutil.which("osascript"):
