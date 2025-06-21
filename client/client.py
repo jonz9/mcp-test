@@ -42,9 +42,10 @@ async def main():
             if query.lower() == "quit":
                 break
 
-            user_content = Content(role="user", parts=[Part(text=query)])
+            guide = "When asking to play a song, always call the `play_song` function with both `song_name` and `artist` as parameters.\n\n"
+            user_content = Content(role="user", parts=[Part(text=guide + query)])
             response = genai_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-1.5-flash",
                 config=GenerateContentConfig(tools=gemini_tools),
                 contents=[user_content],
             )
@@ -54,7 +55,8 @@ async def main():
                 for part in candidate.content.parts:
                     if part.function_call:
                         name = part.function_call.name
-                        args = part.function_call.arguments
+                        args = part.function_call.args
+                        print("Function call args received from Gemini:", args)
                         result = await client.call_tool(name, args)
                         func_part = Part.from_function_response(name=name, response={"result": result.content})
                         tool_content = Content(role="tool", parts=[func_part])
