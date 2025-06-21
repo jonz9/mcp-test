@@ -15,31 +15,33 @@ load_dotenv()
 
 class MCPClient:
     def __init__(self):
-        self.session: Optional[ClientSession] = None
+        self.session: list[ClientSession] = []
+        self.tool_name_to_session: dict[str, ClientSession] = {}
+        self.function_declarations = []
         self.exit_stack = AsyncExitStack()
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY not found. Please add it to your .env file.")
         self.genai_client = genai.Client(api_key=gemini_api_key)
 
-    async def connect_to_server(self, server_script_path: str):
-        command = "python" if server_script_path.endswith('.py') else "node"
-        server_params = StdioServerParameters(command=command, args=[server_script_path])
-        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        self.stdio, self.write = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
-        await self.session.initialize()
-        response = await self.session.list_tools()
-        tools = response.tools
-        print("\nConnected to server with tools:", [tool.name for tool in tools])
-        self.function_declarations = convert_mcp_tools_to_gemini(tools)
+    async def connect_to_servers(self, server_script_paths: list[str]):
+        for server_script_path in server_script_paths:
+            command = "python" if server_script_path.endswith('.py') else "node"
+            server_params = StdioServerParameters(command=command, args=[server_script_path])
+            stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+            self.stdio, self.write = stdio_transport
+            self.session.append(await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write)))
+            await self.session[-1].initialize()
+            response = await self.session[-1].list_tools()
+            tools = response.tools
+            print("\nConnected to server with tools:", [tool.name for tool in tools])
+            self.function_declarations.extend(convert_mcp_tools_to_gemini(tools))
 
     async def process_query(self, query: str) -> str:
         # tool/argument guide for Gemini
         tool_guide = "Available tools and their arguments:\n"
         for tool in self.function_declarations:
             for func in tool.function_declarations:
-                # convert parameters to dict for compatibility
                 if hasattr(func.parameters, 'model_dump'):
                     params_dict = func.parameters.model_dump()
                 elif hasattr(func.parameters, 'dict'):
@@ -49,6 +51,7 @@ class MCPClient:
                 params = params_dict.get('properties', {})
                 param_list = ', '.join([f"'{k}'" for k in params.keys()])
                 tool_guide += f"- {func.name}({param_list})\n"
+        
         tool_guide += "\nUse these tools to answer the query. If a tool is needed, call it with the required parameters.\n If an error occurs, provide the error message and a traceback. \n\n"
 
         user_prompt_content = types.Content(
@@ -86,7 +89,7 @@ class MCPClient:
                                 parts=[function_response_part]
                             )
                             response = self.genai_client.models.generate_content(
-                                model='gemini-2.0-flash-001',
+                                model='gemini-2.5-flash',
                                 contents=[
                                     user_prompt_content,
                                     function_call_part,
@@ -137,12 +140,16 @@ def convert_mcp_tools_to_gemini(mcp_tools):
     return gemini_tools
 
 async def main():
-    if len(sys.argv) < 2:
-        print("Usage: python client.py <path_to_server_script>")
-        sys.exit(1)
+
+    available_servers = [
+        "server/terminal_server.py",
+        "server/spotify_server.py",
+    ]
+
     client = MCPClient()
+
     try:
-        await client.connect_to_server(sys.argv[1])
+        await client.connect_to_servers(available_servers)
         await client.chat_loop()
     finally:
         await client.cleanup()

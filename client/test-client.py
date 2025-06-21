@@ -35,10 +35,25 @@ class MCPClient:
         self.function_declarations = convert_mcp_tools_to_gemini(tools)
 
     async def process_query(self, query: str) -> str:
-        guide = "Use available tools to answer the query. If a tool is needed, call it with the required parameters.\n\n"
+        # tool/argument guide for Gemini
+        tool_guide = "Available tools and their arguments:\n"
+        for tool in self.function_declarations:
+            for func in tool.function_declarations:
+                # convert parameters to dict for compatibility
+                if hasattr(func.parameters, 'model_dump'):
+                    params_dict = func.parameters.model_dump()
+                elif hasattr(func.parameters, 'dict'):
+                    params_dict = func.parameters.dict()
+                else:
+                    params_dict = dict(func.parameters)
+                params = params_dict.get('properties', {})
+                param_list = ', '.join([f"'{k}'" for k in params.keys()])
+                tool_guide += f"- {func.name}({param_list})\n"
+        tool_guide += "\nUse these tools to answer the query. If a tool is needed, call it with the required parameters.\n If an error occurs, provide the error message and a traceback. \n\n"
+
         user_prompt_content = types.Content(
             role='user',
-            parts=[types.Part.from_text(text=guide + query)]
+            parts=[types.Part.from_text(text=tool_guide + query)]
         )
         response = self.genai_client.models.generate_content(
             model='gemini-2.5-flash',
@@ -101,6 +116,8 @@ class MCPClient:
 def clean_schema(schema):
     if isinstance(schema, dict):
         schema.pop("title", None)
+        schema.pop("$ref", None)
+        schema.pop("$defs", None)
         if "properties" in schema and isinstance(schema["properties"], dict):
             for key in schema["properties"]:
                 schema["properties"][key] = clean_schema(schema["properties"][key])
@@ -132,4 +149,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

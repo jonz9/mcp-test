@@ -28,7 +28,6 @@ async def play_song(song_name: str, artist: str) -> str:
     # run subprocess to open Spotify and play using track id
     subprocess.run(['open', '-a', 'Spotify'])
 
-
     try:
         subprocess.run([
             'osascript',
