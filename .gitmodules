@@ -1,0 +1,3 @@
+[submodule "server/google-workspace-mcp"]
+	path = server/google-workspace-mcp
+	url = https://github.com/aaronsb/google-workspace-mcp
