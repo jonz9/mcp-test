@@ -26,15 +26,47 @@ class MCPClient:
         self.genai_client = genai.Client(api_key=gemini_api_key)
         
     async def connect_to_servers(self):
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+
+        if not google_client_id or not google_client_secret:
+            raise ValueError(
+                "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET not found. "
+                "Please add them to your .env file."
+            )
+
+        docker_args = [
+            "run", "--rm", "-i",
+            "-p", "8080:8080",
+            "-v", f"{os.path.expanduser('~')}/.mcp/google-workspace-mcp:/app/config",
+            "-v", f"{os.path.expanduser('~')}/Documents/workspace-mcp-files:/app/workspace",
+            "-e", "GOOGLE_CLIENT_ID",
+            "-e", "GOOGLE_CLIENT_SECRET",
+            "-e", "LOG_MODE=strict",
+            "google-workspace-mcp:local"
+        ]
+
         server_configs = {
-            "google_tools": {"command": "python3", "args": ["server/googletool-server.py"]},
-            "spotify": {"command": "python3", "args": ["server/spotify-server.py"]},
+            "googletool": {
+                "command": "docker", 
+                "args": docker_args,
+                "env": {
+                    "GOOGLE_CLIENT_ID": google_client_id,
+                    "GOOGLE_CLIENT_SECRET": google_client_secret,
+                }
+            },
+            "spotify": {"command": "python3", "args": ["../server/spotify-server.py"]},
+            "terminal": {"command": "python3", "args": ["../server/terminal-server.py"]},
         }
 
         all_tools = []
         for name, config in server_configs.items():
             print(f"🚀 Starting and connecting to {name} server...")
-            server_params = StdioServerParameters(command=config["command"], args=config["args"])
+            server_params = StdioServerParameters(
+                command=config["command"], 
+                args=config["args"],
+                env=config.get("env")
+            )
             stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
             
             session = await self.exit_stack.enter_async_context(ClientSession(*stdio_transport))
@@ -91,11 +123,21 @@ class MCPClient:
                             function_call_part = part
                             
                             # Find the correct session and tool name
-                            server_name, original_tool_name = function_call_part.function_call.name.split('_', 1)
-                            session = self.sessions.get(server_name)
+                            full_tool_name = function_call_part.function_call.name
+                            session = None
+                            server_name = None
+                            original_tool_name = None
+
+                            for s_name in self.sessions.keys():
+                                prefix = f"{s_name}_"
+                                if full_tool_name.startswith(prefix):
+                                    session = self.sessions[s_name]
+                                    server_name = s_name
+                                    original_tool_name = full_tool_name[len(prefix):]
+                                    break
                             
                             if not session:
-                                raise ValueError(f"No server session found for '{server_name}'")
+                                raise ValueError(f"No server session found for tool call '{full_tool_name}'")
 
                             tool_name = original_tool_name
                             tool_args = function_call_part.function_call.args
@@ -116,7 +158,7 @@ class MCPClient:
                                 parts=[function_response_part]
                             )
                             response = self.genai_client.models.generate_content(
-                                model='gemini-2.0-flash-001',
+                                model='gemini-2.5-flash',
                                 contents=[
                                     user_prompt_content,
                                     function_call_part,
@@ -126,7 +168,10 @@ class MCPClient:
                                     tools=self.function_declarations,
                                 ),
                             )
-                            final_text.append(response.candidates[0].content.parts[0].text)
+                            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                                for part in response.candidates[0].content.parts:
+                                    if part.text:
+                                        final_text.append(part.text)
                         else:
                             final_text.append(part.text)
         return "\n".join(final_text)
