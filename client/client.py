@@ -140,91 +140,123 @@ class MCPClient:
             role='user',
             parts=[types.Part.from_text(text=full_prompt)]
         )
-        response = self.genai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[user_prompt_content],
-            config=types.GenerateContentConfig(
-                tools=self.function_declarations,
-            ),
-        )
-        final_text = []
-        for candidate in response.candidates:
-            if candidate.content.parts:
-                for part in candidate.content.parts:
-                    if isinstance(part, types.Part):
-                        if part.function_call:
-                            function_call_part = part
-                            
-                            # Find the correct session and tool name
-                            full_tool_name = function_call_part.function_call.name
-                            session = None
-                            server_name = None
-                            original_tool_name = None
+        
+        # Initialize conversation contents with user prompt
+        conversation_contents = [user_prompt_content]
+        max_iterations = 3
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n🔄 Multi-step reasoning iteration {iteration}/{max_iterations}")
+            
+            # Generate response with current conversation context
+            response = self.genai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=conversation_contents,
+                config=types.GenerateContentConfig(
+                    tools=self.function_declarations,
+                ),
+            )
+            
+            # Check if response has function calls
+            has_function_call = False
+            final_text = []
+            
+            for candidate in response.candidates:
+                if candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if isinstance(part, types.Part):
+                            if part.function_call:
+                                has_function_call = True
+                                function_call_part = part
+                                
+                                # Find the correct session and tool name
+                                full_tool_name = function_call_part.function_call.name
+                                session = None
+                                server_name = None
+                                original_tool_name = None
 
-                            for s_name in self.sessions.keys():
-                                prefix = f"{s_name}_"
-                                if full_tool_name.startswith(prefix):
-                                    session = self.sessions[s_name]
-                                    server_name = s_name
-                                    original_tool_name = full_tool_name[len(prefix):]
-                                    break
-                            
-                            # If exact prefix match fails, search all func.name values
-                            if not session:
-                                for s_name, sess in self.sessions.items():
-                                    for tool in self.function_declarations:
-                                        for func in tool.function_declarations:
-                                            if func.name.endswith(full_tool_name):
-                                                session = sess
-                                                server_name = s_name
-                                                original_tool_name = full_tool_name
+                                for s_name in self.sessions.keys():
+                                    prefix = f"{s_name}_"
+                                    if full_tool_name.startswith(prefix):
+                                        session = self.sessions[s_name]
+                                        server_name = s_name
+                                        original_tool_name = full_tool_name[len(prefix):]
+                                        break
+                                
+                                # If exact prefix match fails, search all func.name values
+                                if not session:
+                                    for s_name, sess in self.sessions.items():
+                                        for tool in self.function_declarations:
+                                            for func in tool.function_declarations:
+                                                if func.name.endswith(full_tool_name):
+                                                    session = sess
+                                                    server_name = s_name
+                                                    original_tool_name = full_tool_name
+                                                    break
+                                            if session:
                                                 break
                                         if session:
                                             break
-                                    if session:
-                                        break
-                            
-                            if not session:
-                                raise ValueError(f"No server session found for tool call '{full_tool_name}'")
+                                
+                                if not session:
+                                    raise ValueError(f"No server session found for tool call '{full_tool_name}'")
 
-                            tool_name = original_tool_name
-                            tool_args = function_call_part.function_call.args
-                            
-                            print(f"\n[Gemini requested tool call on '{server_name}': {tool_name} with args {tool_args}]")
-                            try:
-                                result = await session.call_tool(tool_name, tool_args)
-                                function_response = {"result": result.content}
-                            except Exception as e:
-                                function_response = {"error": str(e)}
+                                tool_name = original_tool_name
+                                tool_args = function_call_part.function_call.args
+                                
+                                print(f"\n[Gemini requested tool call on '{server_name}': {tool_name} with args {tool_args}]")
+                                try:
+                                    result = await session.call_tool(tool_name, tool_args)
+                                    function_response = {"result": result.content}
+                                    print(f"✅ Tool call successful")
+                                except Exception as e:
+                                    function_response = {"error": str(e)}
+                                    print(f"❌ Tool call failed: {str(e)}")
 
-                            function_response_part = types.Part.from_function_response(
-                                name=function_call_part.function_call.name,
-                                response=function_response
-                            )
-                            function_response_content = types.Content(
-                                role='tool',
-                                parts=[function_response_part]
-                            )
-                            response = self.genai_client.models.generate_content(
-                                model='gemini-2.5-flash',
-                                contents=[
-                                    user_prompt_content,
-                                    function_call_part,
-                                    function_response_content,
-                                ],
-                                config=types.GenerateContentConfig(
-                                    tools=self.function_declarations,
-                                ),
-                            )
-                            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                                gemini_response = ""
-                                for part in response.candidates[0].content.parts:
-                                    if part.text:
-                                        gemini_response += part.text
-
-                                # generate_audio("testing testing testing")
-                                final_text.append(gemini_response)
-                        else:
+                                # Create function response content
+                                function_response_part = types.Part.from_function_response(
+                                    name=function_call_part.function_call.name,
+                                    response=function_response
+                                )
+                                function_response_content = types.Content(
+                                    role='tool',
+                                    parts=[function_response_part]
+                                )
+                                
+                                # Add both function call and response to conversation
+                                conversation_contents.append(function_call_part)
+                                conversation_contents.append(function_response_content)
+                                
+                            else:
+                                # This is text content, not a function call
+                                if part.text:
+                                    final_text.append(part.text)
+            
+            # If no function call was made, break the loop
+            if not has_function_call:
+                print(f"✅ No more tool calls needed. Finalizing response...")
+                break
+            else:
+                print(f"🔄 Tool call completed, checking if more are needed...")
+        
+        # If we reached max iterations, get the final response
+        if iteration >= max_iterations:
+            print(f"⚠️  Reached maximum iterations ({max_iterations}), getting final response...")
+            final_response = self.genai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=conversation_contents,
+                config=types.GenerateContentConfig(
+                    tools=self.function_declarations,
+                ),
+            )
+            
+            final_text = []
+            for candidate in final_response.candidates:
+                if candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if isinstance(part, types.Part) and part.text:
                             final_text.append(part.text)
         
         final_response = "\n".join(final_text)
