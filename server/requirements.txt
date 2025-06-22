@@ -29,4 +29,5 @@ typing-extensions==4.14.0
 typing-inspection==0.4.1
 urllib3==2.5.0
 uvicorn==0.34.3
+pytorch==2.4.1
 websockets==15.0.1

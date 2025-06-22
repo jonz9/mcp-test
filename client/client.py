@@ -1,6 +1,8 @@
-import asyncio
+import time
 import os
 import sys
+import subprocess
+import asyncio
 from typing import Optional
 from contextlib import AsyncExitStack
 from mcp import ClientSession, StdioServerParameters
@@ -9,34 +11,83 @@ from google import genai
 from google.genai import types
 from google.genai.types import Tool, FunctionDeclaration
 from google.genai.types import GenerateContentConfig
+from fastmcp import Client
 from dotenv import load_dotenv
+# from csm import generate_audio
 
 load_dotenv()
 
 class MCPClient:
     def __init__(self):
-        self.session: list[ClientSession] = []
-        self.tool_name_to_session: dict[str, ClientSession] = {}
-        self.function_declarations = []
+        self.sessions: dict[str, ClientSession] = {}
         self.exit_stack = AsyncExitStack()
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY not found. Please add it to your .env file.")
         self.genai_client = genai.Client(api_key=gemini_api_key)
+        
+    async def connect_to_servers(self):
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
 
-    async def connect_to_servers(self, server_script_paths: list[str]):
-        for server_script_path in server_script_paths:
-            command = "python" if server_script_path.endswith('.py') else "node"
-            server_params = StdioServerParameters(command=command, args=[server_script_path])
+        if not google_client_id or not google_client_secret:
+            raise ValueError(
+                "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET not found. "
+                "Please add them to your .env file."
+            )
+
+        docker_args = [
+            "run", "--rm", "-i",
+            "-p", "8080:8080",
+            "-v", f"{os.path.expanduser('~')}/.mcp/google-workspace-mcp:/app/config",
+            "-v", f"{os.path.expanduser('~')}/Documents/workspace-mcp-files:/app/workspace",
+            "-e", "GOOGLE_CLIENT_ID",
+            "-e", "GOOGLE_CLIENT_SECRET",
+            "-e", "LOG_MODE=strict",
+            "google-workspace-mcp:local"
+        ]
+
+        server_configs = {
+            "googletool": {
+                "command": "docker", 
+                "args": docker_args,
+                "env": {
+                    "GOOGLE_CLIENT_ID": google_client_id,
+                    "GOOGLE_CLIENT_SECRET": google_client_secret,
+                }
+            },
+            "terminal": {"command": "python3", "args": ["../server/terminal-server.py"]},
+            "spotify": {"command": "python3", "args": ["../server/spotify-server.py"]},
+            "system": {"command": "python3", "args": ["../server/system-server.py"]},
+        }
+
+        all_tools = []
+        for name, config in server_configs.items():
+            print(f"Starting and connecting to {name} server...")
+            server_params = StdioServerParameters(
+                command=config["command"], 
+                args=config["args"],
+                env=config.get("env")
+            )
             stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-            self.stdio, self.write = stdio_transport
-            self.session.append(await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write)))
-            await self.session[-1].initialize()
-            response = await self.session[-1].list_tools()
-            tools = response.tools
-            print("\nConnected to server with tools:", [tool.name for tool in tools])
-            self.function_declarations.extend(convert_mcp_tools_to_gemini(tools))
+            
+            session = await self.exit_stack.enter_async_context(ClientSession(*stdio_transport))
+            await session.initialize()
+            
+            self.sessions[name] = session
+            
+            response = await session.list_tools()
+            
+            # Add prefix to tool names
+            for tool in response.tools:
+                tool.name = f"{name}_" + tool.name
+            
+            all_tools.extend(response.tools)
+            print(f"Connected to {name} server.")
 
+        print("\nConnected to all servers with tools:", [tool.name for tool in all_tools])
+        self.function_declarations = convert_mcp_tools_to_gemini(all_tools)
+        
     async def process_query(self, query: str) -> str:
         # tool/argument guide for Gemini
         tool_guide = "Available tools and their arguments:\n"
@@ -72,16 +123,36 @@ class MCPClient:
                     if isinstance(part, types.Part):
                         if part.function_call:
                             function_call_part = part
-                            tool_name = function_call_part.function_call.name
+                            
+                            # Find the correct session and tool name
+                            full_tool_name = function_call_part.function_call.name
+                            session = None
+                            server_name = None
+                            original_tool_name = None
+
+                            for s_name in self.sessions.keys():
+                                prefix = f"{s_name}_"
+                                if full_tool_name.startswith(prefix):
+                                    session = self.sessions[s_name]
+                                    server_name = s_name
+                                    original_tool_name = full_tool_name[len(prefix):]
+                                    break
+                            
+                            if not session:
+                                raise ValueError(f"No server session found for tool call '{full_tool_name}'")
+
+                            tool_name = original_tool_name
                             tool_args = function_call_part.function_call.args
-                            print(f"\n[Gemini requested tool call: {tool_name} with args {tool_args}]")
+                            
+                            print(f"\n[Gemini requested tool call on '{server_name}': {tool_name} with args {tool_args}]")
                             try:
-                                result = await self.session.call_tool(tool_name, tool_args)
+                                result = await session.call_tool(tool_name, tool_args)
                                 function_response = {"result": result.content}
                             except Exception as e:
                                 function_response = {"error": str(e)}
+
                             function_response_part = types.Part.from_function_response(
-                                name=tool_name,
+                                name=function_call_part.function_call.name,
                                 response=function_response
                             )
                             function_response_content = types.Content(
@@ -99,10 +170,23 @@ class MCPClient:
                                     tools=self.function_declarations,
                                 ),
                             )
-                            final_text.append(response.candidates[0].content.parts[0].text)
+                            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                                gemini_response = ""
+                                for part in response.candidates[0].content.parts:
+                                    if part.text:
+                                        gemini_response += part.text
+
+                                # generate_audio("testing testing testing")
+                                final_text.append(gemini_response)
                         else:
                             final_text.append(part.text)
         return "\n".join(final_text)
+    
+    # async def text_to_speech(self, text: str) -> None:
+    #     if not text:
+    #         return
+    #     try:
+
 
     async def chat_loop(self):
         print("\nMCP Client Started! Type 'quit' to exit.")
@@ -118,6 +202,8 @@ class MCPClient:
 
 def clean_schema(schema):
     if isinstance(schema, dict):
+        if 'oneOf' in schema and isinstance(schema.get('oneOf'), list) and schema['oneOf']:
+            return clean_schema(schema['oneOf'][0])
         schema.pop("title", None)
         schema.pop("$ref", None)
         schema.pop("$defs", None)
@@ -140,16 +226,12 @@ def convert_mcp_tools_to_gemini(mcp_tools):
     return gemini_tools
 
 async def main():
-
-    available_servers = [
-        "server/terminal_server.py",
-        "server/spotify_server.py",
-    ]
-
     client = MCPClient()
 
     try:
-        await client.connect_to_servers(available_servers)
+        await client.connect_to_servers()
+        # await client.connect_to_tcp_server()
+        # await client.connect_to_server(sys.argv[1])
         await client.chat_loop()
     finally:
         await client.cleanup()

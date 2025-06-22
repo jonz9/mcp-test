@@ -3,6 +3,7 @@ import os
 import sys
 from typing import Optional
 from contextlib import AsyncExitStack
+from client.csm import generate_audio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from google import genai
@@ -86,7 +87,7 @@ class MCPClient:
                                 parts=[function_response_part]
                             )
                             response = self.genai_client.models.generate_content(
-                                model='gemini-2.0-flash-001',
+                                model='gemini-2.5-flash',
                                 contents=[
                                     user_prompt_content,
                                     function_call_part,
@@ -97,6 +98,7 @@ class MCPClient:
                                 ),
                             )
                             final_text.append(response.candidates[0].content.parts[0].text)
+                            generate_audio("testing testing testing")
                         else:
                             final_text.append(part.text)
         return "\n".join(final_text)
