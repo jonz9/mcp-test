@@ -18,13 +18,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class MCPClient:
-    def __init__(self):
+    def __init__(self, history_length: int = 4):
         self.sessions: dict[str, ClientSession] = {}
         self.exit_stack = AsyncExitStack()
+        self.history_length = history_length
+        self.conversation_history = []
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY not found. Please add it to your .env file.")
         self.genai_client = genai.Client(api_key=gemini_api_key)
+        
+    def add_to_history(self, query: str, response: str):
+        """Add a query-response pair to conversation history."""
+        self.conversation_history.append({
+            "query": query,
+            "response": response,
+            "timestamp": time.time()
+        })
+        
+        # Keep only the last k interactions
+        if len(self.conversation_history) > self.history_length:
+            self.conversation_history = self.conversation_history[-self.history_length:]
+    
+    def get_history_context(self) -> str:
+        """Format conversation history for inclusion in the prompt."""
+        if not self.conversation_history:
+            return ""
+        
+        history_text = "\n\nPrevious conversation:\n"
+        for i, interaction in enumerate(self.conversation_history, 1):
+            history_text += f"Q{i}: {interaction['query']}\n"
+            history_text += f"A{i}: {interaction['response'][:200]}...\n"  # Truncate long responses
+        history_text += "\n"
+        
+        return history_text
         
     async def connect_to_servers(self):
         google_client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -105,9 +132,13 @@ class MCPClient:
         
         tool_guide += "\nUse these tools to answer the query. If a tool is needed, call it with the required parameters.\n If an error occurs, provide the error message and a traceback. \n\n"
 
+        # Include conversation history in the prompt
+        history_context = self.get_history_context()
+        full_prompt = tool_guide + history_context + query
+
         user_prompt_content = types.Content(
             role='user',
-            parts=[types.Part.from_text(text=tool_guide + query)]
+            parts=[types.Part.from_text(text=full_prompt)]
         )
         response = self.genai_client.models.generate_content(
             model='gemini-2.5-flash',
@@ -137,6 +168,21 @@ class MCPClient:
                                     server_name = s_name
                                     original_tool_name = full_tool_name[len(prefix):]
                                     break
+                            
+                            # If exact prefix match fails, search all func.name values
+                            if not session:
+                                for s_name, sess in self.sessions.items():
+                                    for tool in self.function_declarations:
+                                        for func in tool.function_declarations:
+                                            if func.name.endswith(full_tool_name):
+                                                session = sess
+                                                server_name = s_name
+                                                original_tool_name = full_tool_name
+                                                break
+                                        if session:
+                                            break
+                                    if session:
+                                        break
                             
                             if not session:
                                 raise ValueError(f"No server session found for tool call '{full_tool_name}'")
@@ -180,16 +226,17 @@ class MCPClient:
                                 final_text.append(gemini_response)
                         else:
                             final_text.append(part.text)
-        return "\n".join(final_text)
-    
-    # async def text_to_speech(self, text: str) -> None:
-    #     if not text:
-    #         return
-    #     try:
-
+        
+        final_response = "\n".join(final_text)
+        
+        # Add to conversation history
+        self.add_to_history(query, final_response)
+        
+        return final_response
 
     async def chat_loop(self):
-        print("\nMCP Client Started! Type 'quit' to exit.")
+        print(f"\nMCP Client Started! Type 'quit' to exit.")
+        print(f"Conversation history length: {self.history_length} interactions")
         while True:
             query = input("\nQuery: ").strip()
             if query.lower() == 'quit':
@@ -226,8 +273,13 @@ def convert_mcp_tools_to_gemini(mcp_tools):
     return gemini_tools
 
 async def main():
-    client = MCPClient()
-
+    # if len(sys.argv) < 2:
+    #     print("Usage: python client.py <path_to_server_script>")
+    #     sys.exit(1)
+    
+    # You can adjust the history length here
+    history_length = 5  # Keep last 5 interactions
+    client = MCPClient(history_length=history_length)
     try:
         await client.connect_to_servers()
         # await client.connect_to_tcp_server()
